@@ -1,0 +1,45 @@
+name: Deploy Lambda Functions
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up AWS CLI
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Package listarDynamo Lambda
+        run: |
+          mkdir -p listarDynamo
+          cp listarDynamo.py listarDynamo/
+          cd listarDynamo
+          zip -r ../listarDynamo.zip .
+          cd ..
+
+      - name: Package listarS3 Lambda
+        run: |
+          mkdir -p listarS3
+          cp listarS3.py listarS3/
+          cd listarS3
+          zip -r ../listarS3.zip .
+          cd ..
+
+      - name: Deploy listarDynamo Lambda
+        run: |
+          aws lambda update-function-code --function-name listarDynamo --zip-file fileb://listarDynamo.zip
+
+      - name: Deploy listarS3 Lambda
+        run: |
+          aws lambda update-function-code --function-name listarS3 --zip-file fileb://listarS3.zip
