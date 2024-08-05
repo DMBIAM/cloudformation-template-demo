@@ -16,40 +16,73 @@ Parameters:
     Type: String
     Description: "Tag value for resources"
     Default: "123"
+  Stage:
+    Type: String
+    Default: dev
 
 Resources:
-  S3Bucket:
-    Type: AWS::S3::Bucket
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
     Properties:
-      BucketName: s3demo
+      RoleName: lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Path: '/'
+      Policies:
+        - PolicyName: lambda-execution-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - dynamodb:PutItem
+                  - dynamodb:DescribeTable
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - lambda:*
+                  - cloudfront:CreateInvalidation
+                Resource: "*"
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+  
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for Lambda functions"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: "0.0.0.0/0"
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
 
-  S3BucketPolicy:
-    Type: AWS::S3::BucketPolicy
+  S3Bucket:
+    Type: AWS::S3::Bucket
     Properties:
-      Bucket: !Ref S3Bucket
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Deny
-            Principal: "*"
-            Action: "s3:*"
-            Resource: 
-              - !Sub "arn:aws:s3:::${S3Bucket}/*"
-              - !Sub "arn:aws:s3:::${S3Bucket}"
-            Condition:
-              Bool:
-                aws:SecureTransport: false
-          - Effect: Allow
-            Principal:
-              AWS: 
-                - !GetAtt LambdaExecutionRole.Arn
-                - !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
-            Action: "s3:GetObject"
-            Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
-  
+      BucketName: s3-stack-dmb-4-08-2024
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
   CloudFrontOriginAccessIdentity:
     Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
     Properties:
@@ -61,20 +94,43 @@ Resources:
     Properties:
       DistributionConfig:
         Origins:
-          - Id: S3Origin
-            DomainName: !GetAtt S3Bucket.DomainName
+          - DomainName: !Sub "${S3Bucket}.s3.amazonaws.com"
+            Id: S3Origin
             S3OriginConfig:
               OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
         Enabled: true
+        Comment: "CloudFront distribution for S3 bucket"
+        DefaultRootObject: index.html
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
-          ViewerProtocolPolicy: allow-all
+          ViewerProtocolPolicy: redirect-to-https
           ForwardedValues:
             QueryString: false
-        DefaultRootObject: index.html
-      Tags:
-        - Key: !Ref TagKey
-          Value: !Ref TagValue
+            Cookies:
+              Forward: none
+          AllowedMethods:
+              - GET
+              - HEAD
+          CachedMethods:
+              - GET
+              - HEAD        
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontAccess
+            Effect: Allow
+            Principal:
+              CanonicalUser:
+                Fn::GetAtt: [ CloudFrontOriginAccessIdentity , S3CanonicalUserId ]
+            Action: "s3:GetObject"
+            Resource: !Sub "${S3Bucket.Arn}/*"
 
   DynamoDBTable:
     Type: AWS::DynamoDB::Table
@@ -85,14 +141,21 @@ Resources:
           AttributeType: N
         - AttributeName: Nombre
           AttributeType: S
+        - AttributeName: Cantidad
+          AttributeType: N
       KeySchema:
         - AttributeName: Id
           KeyType: HASH
         - AttributeName: Nombre
           KeyType: RANGE
-      ProvisionedThroughput:
-        ReadCapacityUnits: 5
-        WriteCapacityUnits: 5
+      GlobalSecondaryIndexes:
+        - IndexName: CantidadIndex
+          KeySchema:
+            - AttributeName: Cantidad
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
@@ -121,6 +184,8 @@ Resources:
       VpcConfig:
         SubnetIds:
           - !Ref SubnetId
+        SecurityGroupIds:
+          - !Ref SecurityGroup
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
@@ -132,9 +197,25 @@ Resources:
       Handler: index.handler
       Runtime: python3.8
       Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          s3 = boto3.client('s3')
+          bucket_name = 's3-stack-dmb-4-08-2024'
+
+          def handler(event, context):
+              objects = s3.list_objects_v2(Bucket=bucket_name)
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(objects.get('Contents', []))
+              }
       VpcConfig:
         SubnetIds:
           - !Ref SubnetId
+        SecurityGroupIds:
+          - !Ref SecurityGroup
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
@@ -146,9 +227,25 @@ Resources:
       Handler: index.handler
       Runtime: python3.8
       Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          dynamodb = boto3.client('dynamodb')
+          table_name = 'productos'
+
+          def handler(event, context):
+              response = dynamodb.scan(TableName=table_name)
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(response['Items'])
+              }
       VpcConfig:
         SubnetIds:
           - !Ref SubnetId
+        SecurityGroupIds:
+          - !Ref SecurityGroup
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
@@ -156,10 +253,37 @@ Resources:
   ApiGateway:
     Type: AWS::ApiGateway::RestApi
     Properties:
+      ApiKeySourceType: HEADER
       Name: APIGatewayDemo
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'lambda'
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: 'application/json'
+      RestApiId: !Ref ApiGateway
+      Schema: {}
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - GetProductsMethod
+      - ListS3ObjectsMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: !Ref Stage
 
   GetProductsMethod:
     Type: AWS::ApiGateway::Method
@@ -167,14 +291,14 @@ Resources:
       RestApiId: !Ref ApiGateway
       ResourceId: !GetAtt ApiGateway.RootResourceId
       HttpMethod: GET
+      ApiKeyRequired: false
       AuthorizationType: NONE
       Integration:
+        ConnectionType: INTERNET
         Type: AWS_PROXY
-        IntegrationHttpMethod: POST
+        IntegrationHttpMethod: GET
+        PassthroughBehavior: WHEN_NO_MATCH
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ListarDynamoLambda.Arn}/invocations"
-      Tags:
-        - Key: !Ref TagKey
-          Value: !Ref TagValue
 
   ListS3ObjectsMethod:
     Type: AWS::ApiGateway::Method
@@ -183,26 +307,28 @@ Resources:
       ResourceId: !GetAtt ApiGateway.RootResourceId
       HttpMethod: POST
       AuthorizationType: NONE
-      ApiKeyRequired: true
+      ApiKeyRequired: false
       Integration:
+        ConnectionType: INTERNET
         Type: AWS_PROXY
+        Credentials: !GetAtt LambdaExecutionRole.Arn
         IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ListarS3Lambda.Arn}/invocations"
-      Tags:
-        - Key: !Ref TagKey
-          Value: !Ref TagValue
 
-  ApiKey:
-    Type: AWS::ApiGateway::ApiKey
+  LambdaS3InvokePermission:
+    Type: AWS::Lambda::Permission
     Properties:
-      Enabled: true
-      Name: DemoApiKey
-      StageKeys:
-        - RestApiId: !Ref ApiGateway
-          StageName: prod
-      Tags:
-        - Key: !Ref TagKey
-          Value: !Ref TagValue
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ListarS3Lambda
+      Principal: apigateway.amazonaws.com
+
+  LambdaDynamoInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ListarDynamoLambda
+      Principal: apigateway.amazonaws.com
 
   UploadIndexHtmlLambda:
     Type: AWS::Lambda::Function
@@ -229,17 +355,33 @@ Resources:
       VpcConfig:
         SubnetIds:
           - !Ref SubnetId
+        SecurityGroupIds:
+          - !Ref SecurityGroup
       Tags:
         - Key: !Ref TagKey
           Value: !Ref TagValue
 
-  UploadIndexHtmlCustomResource:
-    Type: Custom::UploadIndexHtml
-    Properties:
-      ServiceToken: !GetAtt UploadIndexHtmlLambda.Arn
-      bucket_name: !Ref S3Bucket
-
 Outputs:
-  CloudFrontURL:
-    Description: "The CloudFront distribution URL"
-    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+  S3BucketName:
+    Description: "Name of the S3 bucket"
+    Value: !Ref S3Bucket
+
+  CloudFrontDistributionId:
+    Description: "ID of the CloudFront distribution"
+    Value: !Ref CloudFrontDistribution
+
+  DynamoDBTableName:
+    Description: "Name of the DynamoDB table"
+    Value: !Ref DynamoDBTable
+
+  ListarS3LambdaFunctionArn:
+    Description: "ARN of the listarS3 Lambda function"
+    Value: !GetAtt ListarS3Lambda.Arn
+
+  ListarDynamoLambdaFunctionArn:
+    Description: "ARN of the listarDynamo Lambda function"
+    Value: !GetAtt ListarDynamoLambda.Arn
+
+  ApiGatewayInvokeUrl:
+    Description: "Invoke URL for the API Gateway"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/"
