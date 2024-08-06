@@ -1,3 +1,4 @@
+# TODO FIX - NO WORK
 AWSTemplateFormatVersion: '2010-09-09'
 Description: "CloudFormation template for the given AWS architecture"
 
@@ -236,11 +237,14 @@ Resources:
           table_name = 'productos'
 
           def handler(event, context):
-              response = dynamodb.scan(TableName=table_name)
-              return {
-                  'statusCode': 200,
-                  'body': json.dumps(response['Items'])
-              }
+            response = dynamodb.scan(TableName=table_name)
+            return {
+              'isBase64Encoded': False,
+              'statusCode': 200,
+              'headers': {},
+              'multiValueHeaders': {},
+              'body': json.dumps(response['Items'])
+            }
       VpcConfig:
         SubnetIds:
           - !Ref SubnetId

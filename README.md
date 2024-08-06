@@ -168,6 +168,3 @@ aws cloudformation create-stack --stack-name my-stack --template-body file://tem
 ## Deploy listarS3 Lambda:
 
 - Usa el archivo .zip empaquetado para actualizar la función Lambda llamada listarS3.
-
-
-

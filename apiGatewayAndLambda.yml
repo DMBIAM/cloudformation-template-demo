@@ -1,0 +1,525 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "CloudFormation template for the given AWS architecture"
+
+# Global Parameter
+Parameters:
+  TagKey:
+    Type: String
+    Description: "Tag key for resources"
+    Default: "lm_troux_uid"
+  TagValue:
+    Type: String
+    Description: "Tag value for resources"
+    Default: "123"
+  Stage:
+    Type: String
+    Description: "Stage for API"
+    Default: v0
+  KeyApi:
+    Type: String
+    Description: "key for request"
+    Default: "x-api-test-demo"
+  LimitValue:
+    Type: Number
+    Description: "Max number request by period"
+    Default: 100
+  PeriodValue:
+    Type: String
+    Description: "Quota period for the usage plan (e.g., DAY, WEEK, MONTH)"
+    Default: "DAY"
+
+# Create resources
+Resources:
+  
+  # Define the IAM Role for Lambda function General
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: '/'
+      Policies:
+        - PolicyName: LambdaAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - dynamodb:PutItem
+                  - dynamodb:DescribeTable
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - lambda:InvokeFunction
+                Resource: 
+                  - 'arn:aws:logs:*:*:*'
+                  - 'arn:aws:dynamodb:*:*:table/productos'
+                  - 'arn:aws:lambda:*:*:function:SeedDynamoDB'
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+  
+  # Define the IAM Role for Lambda function ReadOnly S3
+  ReadOnlyS3LambdaIamRole:
+    Type: 'AWS::IAM::Role'
+    DependsOn: 
+      - S3Bucket
+    Properties:
+      RoleName: 'ReadOnlyS3LambdaIamRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'LambdaS3ReadOnlyPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:ListBucket'
+                Resource: !Sub "${S3Bucket.Arn}/*"
+              - Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                Resource: !Sub "${S3Bucket.Arn}/*"
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Define the IAM Role for Lambda function ReadOnly DynamoDB
+  ReadOnlyDynamoDBLambdaIamRole:
+    Type: 'AWS::IAM::Role'
+    DependsOn: 
+      - DynamoDBTable
+    Properties:
+      RoleName: 'ReadOnlyDynamoDBLambdaIamRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBReadOnlyAccess
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Define the Lambda function ListS3Objects (POST)
+  LambdaFunctionListS3Objects:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          s3 = boto3.client('s3')
+          bucket_name = 's3-stack-dmb-4-08-2024'
+
+          def handler(event, context):
+            try:
+              response = s3.list_objects_v2(Bucket=bucket_name)
+              if 'Contents' in response:
+                object_keys = [obj['Key'] for obj in response['Contents']]
+              else:
+                object_keys = []
+              
+              return {
+                'isBase64Encoded': False,
+                'statusCode': 200,
+                'headers': {},
+                'multiValueHeaders': {},
+                'body': json.dumps(object_keys)
+              }
+            except Exception as e:
+              return {
+                'statusCode': 500,
+                'body': json.dumps({'error': str(e)})
+              }
+      Description: AWS Lambda function ListS3Objects
+      FunctionName: 'lambda-function-list-s3-objects'
+      Handler: index.handler
+      MemorySize: 256
+      Role: !GetAtt ReadOnlyS3LambdaIamRole.Arn
+      Runtime: python3.8
+      Timeout: 60
+
+  # Define the Lambda function ListDynamoObjects (GET)
+  LambdaFunctionListDynamoObjects:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          dynamodb = boto3.client('dynamodb')
+          table_name = 'productos'
+
+          def handler(event, context):
+            try:
+              response = dynamodb.scan(TableName=table_name)
+              return {
+                'isBase64Encoded': False,
+                'statusCode': 200,
+                'headers': {},
+                'multiValueHeaders': {},
+                'body': json.dumps(response['Items'])
+              }
+            except Exception as e:
+              return {
+                'statusCode': 500,
+                'body': json.dumps({'error': str(e)})
+              }
+      Description: AWS Lambda function ListDynamoObjects
+      FunctionName: 'lambda-function-list-dynamo-objects'
+      Handler: index.handler
+      MemorySize: 256
+      Role: !GetAtt ReadOnlyDynamoDBLambdaIamRole.Arn
+      Runtime: python3.8
+      Timeout: 60
+
+  # Define the IAM Role for API Gateway
+  ApiGatewayIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'apigateway.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'lambda:InvokeFunction'
+                Resource: 
+                  - !GetAtt LambdaFunctionListS3Objects.Arn
+                  - !GetAtt LambdaFunctionListDynamoObjects.Arn
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+
+  # Define the API Gateway
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      ApiKeySourceType: HEADER
+      Description: An API Gateway with a Lambda Integration
+      EndpointConfiguration:
+        Types:
+          - EDGE
+      Name: lambda-api
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+  
+  # Define ApiKey
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - ApiGatewayRestApi
+    Properties:
+      Enabled: true
+      GenerateDistinctId: true
+      Name: LambdaApiKey
+      StageKeys:
+        - RestApiId: !Ref ApiGatewayRestApi
+          StageName: !Ref ApiGatewayStage
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Usage Plan (quotes)
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      ApiStages:
+        - ApiId: !Ref ApiGatewayRestApi
+          Stage: !Ref ApiGatewayStage
+      Description: "Usage plan for API"
+      UsagePlanName: "ApiRestUsagePlan"
+      Quota:
+        Limit: !Ref LimitValue
+        Period: !Ref PeriodValue
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Usage Plan Key
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+  # Resources for ApiGateway
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: 
+        Fn::GetAtt:
+          - ApiGatewayRestApi
+          - RootResourceId
+      PathPart: 'lambda'
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Method GET For DynamoDB
+  GetProductsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        ConnectionType: INTERNET
+        Credentials: !GetAtt ApiGatewayIamRole.Arn
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
+        TimeoutInMillis: 29000
+        Type: AWS_PROXY
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionListDynamoObjects.Arn}/invocations'
+      OperationName: 'lambda'
+      ResourceId: !Ref ApiGatewayResource
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Method POST por S3
+  PostLisS3ObjectsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        ConnectionType: INTERNET
+        Credentials: !GetAtt ApiGatewayIamRole.Arn
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
+        TimeoutInMillis: 29000
+        Type: AWS_PROXY
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionListS3Objects.Arn}/invocations'
+      OperationName: 'lambda'
+      ResourceId: !Ref ApiGatewayResource
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Model
+  ApiGatewayModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: 'application/json'
+      RestApiId: !Ref ApiGatewayRestApi
+      Schema: {}
+
+  # Deployment
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - GetProductsMethod
+      - PostLisS3ObjectsMethod
+    Properties:
+      Description: Lambda API Deployment
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Stage
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref ApiGatewayDeployment
+      Description: Lambda API Stage
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: !Ref Stage
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+  
+  # Create Table
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: productos
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: N
+        - AttributeName: Nombre
+          AttributeType: S
+        - AttributeName: Cantidad
+          AttributeType: N
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+        - AttributeName: Nombre
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: CantidadIndex
+          KeySchema:
+            - AttributeName: Cantidad
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Insert data into table
+  DynamoDBSeedData:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SeedDynamoDB
+      Handler: index.handler
+      Runtime: python3.8
+      Role: !GetAtt LambdaIamRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+
+          def handler(event, context):
+              dynamodb = boto3.client('dynamodb')
+              table_name = 'productos'
+              items = [
+                  {"Id": {"N": "1"}, "Nombre": {"S": "Tomate"}, "Cantidad": {"N": "10"}},
+                  {"Id": {"N": "2"}, "Nombre": {"S": "Cebolla"}, "Cantidad": {"N": "5"}}
+              ]
+              for item in items:
+                  dynamodb.put_item(TableName=table_name, Item=item)
+              return {"statusCode": 200, "body": "Data inserted successfully"}
+      Timeout: 60
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Create file index.html into S3        
+  UploadIndexHtmlLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: uploadIndexHtmlS3
+      Handler: index.handler
+      Runtime: python3.8
+      Role: !GetAtt LambdaIamRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+
+          def handler(event, context):
+              s3 = boto3.client('s3')
+              bucket_name = "s3-stack-dmb-4-08-2024"
+              index_html_content = """
+              <html>
+              <head><title>Welcome</title></head>
+              <body><h1>Welcome to CloudFront DMB!</h1></body>
+              </html>
+              """
+              s3.put_object(Bucket=bucket_name, Key='index.html', Body=index_html_content, ContentType='text/html')
+              return {"statusCode": 200, "body": "index.html uploaded successfully"}
+      Timeout: 60
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # Create S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: s3-stack-dmb-4-08-2024
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
+
+  # S3 Policy
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: 
+      - S3Bucket
+      - CloudFrontOriginAccessIdentity
+      - CloudFrontDistribution
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontAccess
+            Effect: Allow
+            Principal:
+              CanonicalUser:
+                Fn::GetAtt: [ CloudFrontOriginAccessIdentity , S3CanonicalUserId ]
+            Action: "s3:GetObject"
+            Resource: !Sub "${S3Bucket.Arn}/*"
+          - Sid: AllowReadOnlyS3LambdaIamRole
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/ReadOnlyS3LambdaIamRole"
+            Action:
+              - "s3:GetObject"
+              - "s3:ListBucket"
+            Resource: 
+              - !Sub "${S3Bucket.Arn}/*"
+              - !Sub "${S3Bucket.Arn}"
+
+  # CLoudFront Access
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "Access identity for CloudFront to access S3"
+
+  # CLoudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !Sub "${S3Bucket}.s3.amazonaws.com"
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
+        Enabled: true
+        Comment: "CloudFront distribution for S3 bucket"
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          AllowedMethods:
+              - GET
+              - HEAD
+          CachedMethods:
+              - GET
+              - HEAD        
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Ref TagValue
